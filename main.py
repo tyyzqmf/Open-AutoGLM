@@ -451,6 +451,27 @@ Examples:
         default=os.getenv("PHONE_AGENT_API_KEY", "EMPTY"),
         help="API key for model authentication",
     )
+    
+    # SageMaker options
+    parser.add_argument(
+        "--use-sagemaker",
+        action="store_true",
+        help="Use AWS SageMaker endpoint instead of OpenAI API",
+    )
+    
+    parser.add_argument(
+        "--sagemaker-endpoint",
+        type=str,
+        default=os.getenv("PHONE_AGENT_SAGEMAKER_ENDPOINT", ""),
+        help="SageMaker endpoint name",
+    )
+    
+    parser.add_argument(
+        "--sagemaker-region",
+        type=str,
+        default=os.getenv("PHONE_AGENT_SAGEMAKER_REGION", "us-east-1"),
+        help="AWS region for SageMaker endpoint",
+    )
 
     parser.add_argument(
         "--max-steps",
@@ -796,9 +817,18 @@ def main():
     ):
         sys.exit(1)
 
-    # Check model API connectivity and model availability
-    if not check_model_api(args.base_url, args.model, args.apikey):
-        sys.exit(1)
+    # Check model API connectivity and model availability (skip for SageMaker)
+    if not args.use_sagemaker:
+        if not check_model_api(args.base_url, args.model, args.apikey):
+            sys.exit(1)
+    # Check model API connectivity and model availability (skip for SageMaker)
+    if not args.use_sagemaker:
+        if not check_model_api(args.base_url, args.model, args.apikey):
+            sys.exit(1)
+    # Check model API connectivity and model availability (skip for SageMaker)
+    if not args.use_sagemaker:
+        if not check_model_api(args.base_url, args.model, args.apikey):
+            sys.exit(1)
 
     # Create configurations and agent based on device type
     model_config = ModelConfig(
@@ -806,6 +836,9 @@ def main():
         model_name=args.model,
         api_key=args.apikey,
         lang=args.lang,
+        use_sagemaker=args.use_sagemaker,
+        sagemaker_endpoint=args.sagemaker_endpoint,
+        sagemaker_region=args.sagemaker_region,
     )
 
     if device_type == DeviceType.IOS:

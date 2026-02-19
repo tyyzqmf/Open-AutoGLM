@@ -23,6 +23,11 @@ class ModelConfig:
     frequency_penalty: float = 0.2
     extra_body: dict[str, Any] = field(default_factory=dict)
     lang: str = "cn"  # Language for UI messages: 'cn' or 'en'
+    
+    # SageMaker support
+    use_sagemaker: bool = False
+    sagemaker_endpoint: str = ""
+    sagemaker_region: str = "us-east-1"
 
 
 @dataclass
@@ -48,7 +53,21 @@ class ModelClient:
 
     def __init__(self, config: ModelConfig | None = None):
         self.config = config or ModelConfig()
-        self.client = OpenAI(base_url=self.config.base_url, api_key=self.config.api_key)
+        
+        if self.config.use_sagemaker:
+            # Use SageMaker endpoint
+            import boto3
+            self.sagemaker_runtime = boto3.client(
+                'sagemaker-runtime',
+                region_name=self.config.sagemaker_region
+            )
+            self.client = None
+            print(f"📍 使用 SageMaker Endpoint: {self.config.sagemaker_endpoint}")
+        else:
+            # Use OpenAI-compatible API
+            self.client = OpenAI(base_url=self.config.base_url, api_key=self.config.api_key)
+            self.sagemaker_runtime = None
+            print(f"📍 使用 OpenAI API: {self.config.base_url}")
 
     def request(self, messages: list[dict[str, Any]]) -> ModelResponse:
         """
@@ -63,6 +82,12 @@ class ModelClient:
         Raises:
             ValueError: If the response cannot be parsed.
         """
+        if self.config.use_sagemaker:
+            return self._request_sagemaker(messages)
+        else:
+            return self._request_openai(messages)
+    
+    def _request_openai(self, messages: list[dict[str, Any]]) -> ModelResponse:
         # Start timing
         start_time = time.time()
         time_to_first_token = None
@@ -214,6 +239,203 @@ class ModelClient:
 
         # Rule 4: No markers found, return content as action
         return "", content
+    
+    def _request_sagemaker(self, messages: list[dict[str, Any]]) -> ModelResponse:
+        """
+        Send a request to SageMaker endpoint.
+        
+        Args:
+            messages: List of message dictionaries in OpenAI format.
+            
+        Returns:
+            ModelResponse containing thinking and action.
+        """
+        import json
+        
+        # Start timing
+        start_time = time.time()
+        
+        # Build payload for SageMaker (non-streaming)
+        payload = {
+            "model": self.config.model_name,
+            "messages": messages,
+            "max_tokens": self.config.max_tokens,
+            "temperature": self.config.temperature,
+            "top_p": self.config.top_p,
+            "frequency_penalty": self.config.frequency_penalty,
+            "stream": False  # Use non-streaming for SageMaker
+        }
+        
+        print(f"📤 发送请求到 SageMaker...")
+        print(f"   Endpoint: {self.config.sagemaker_endpoint}")
+        print(f"   Payload size: {len(json.dumps(payload))} bytes")
+        
+        try:
+            # Invoke SageMaker endpoint (non-streaming)
+            response = self.sagemaker_runtime.invoke_endpoint(
+                EndpointName=self.config.sagemaker_endpoint,
+                ContentType='application/json',
+                Body=json.dumps(payload)
+            )
+            
+            # Parse response
+            response_body = response['Body'].read().decode('utf-8')
+            result = json.loads(response_body)
+            
+            print(f"✅ 收到响应")
+            
+            # Extract content from OpenAI format response
+            if 'choices' in result and len(result['choices']) > 0:
+                raw_content = result['choices'][0].get('message', {}).get('content', '')
+            else:
+                raw_content = str(result)
+            
+            # Print thinking (no streaming, so print all at once)
+            thinking, action = self._parse_response(raw_content)
+            if thinking:
+                print(thinking)
+                print()
+            
+            # Calculate total time
+            total_time = time.time() - start_time
+            
+            # Print performance metrics
+            lang = self.config.lang
+            print()
+            print("=" * 50)
+            print(f"⏱️  {get_message('performance_metrics', lang)}:")
+            print("-" * 50)
+            print(f"{get_message('total_inference_time', lang)}:          {total_time:.3f}s")
+            print("=" * 50)
+            
+            return ModelResponse(
+                thinking=thinking,
+                action=action,
+                raw_content=raw_content,
+                time_to_first_token=None,
+                time_to_thinking_end=None,
+                total_time=total_time,
+            )
+            
+        except Exception as e:
+            print(f"❌ SageMaker 调用失败: {e}")
+            import traceback
+            traceback.print_exc()
+            raised = {
+            "model": self.config.model_name,
+            "messages": messages,
+            "max_tokens": self.config.max_tokens,
+            "temperature": self.config.temperature,
+            "top_p": self.config.top_p,
+            "frequency_penalty": self.config.frequency_penalty,
+            "stream": True
+        }
+        
+        print(f"📤 发送请求到 SageMaker...")
+        
+        # Invoke SageMaker endpoint
+        response = self.sagemaker_runtime.invoke_endpoint_with_response_stream(
+            EndpointName=self.config.sagemaker_endpoint,
+            ContentType='application/json',
+            Body=json.dumps(payload)
+        )
+        
+        # Process streaming response
+        raw_content = ""
+        buffer = ""
+        action_markers = ["finish(message=", "do(action="]
+        in_action_phase = False
+        first_token_received = False
+        time_to_first_token = None
+        time_to_thinking_end = None
+        
+        event_stream = response['Body']
+        for event in event_stream:
+            if 'PayloadPart' in event:
+                chunk_data = event['PayloadPart']['Bytes'].decode('utf-8')
+                
+                # Parse SSE format: data: {...}
+                for line in chunk_data.split('\n'):
+                    if line.startswith('data: '):
+                        try:
+                            chunk_json = json.loads(line[6:])
+                            if 'choices' in chunk_json and len(chunk_json['choices']) > 0:
+                                delta = chunk_json['choices'][0].get('delta', {})
+                                content = delta.get('content')
+                                
+                                if content:
+                                    raw_content += content
+                                    
+                                    # Record time to first token
+                                    if not first_token_received:
+                                        time_to_first_token = time.time() - start_time
+                                        first_token_received = True
+                                    
+                                    if in_action_phase:
+                                        continue
+                                    
+                                    buffer += content
+                                    
+                                    # Check for action markers
+                                    marker_found = False
+                                    for marker in action_markers:
+                                        if marker in buffer:
+                                            thinking_part = buffer.split(marker, 1)[0]
+                                            print(thinking_part, end="", flush=True)
+                                            print()
+                                            in_action_phase = True
+                                            marker_found = True
+                                            
+                                            if time_to_thinking_end is None:
+                                                time_to_thinking_end = time.time() - start_time
+                                            break
+                                    
+                                    if marker_found:
+                                        continue
+                                    
+                                    # Check if buffer ends with marker prefix
+                                    is_potential_marker = False
+                                    for marker in action_markers:
+                                        for i in range(1, len(marker)):
+                                            if buffer.endswith(marker[:i]):
+                                                is_potential_marker = True
+                                                break
+                                        if is_potential_marker:
+                                            break
+                                    
+                                    if not is_potential_marker:
+                                        print(buffer, end="", flush=True)
+                                        buffer = ""
+                        except json.JSONDecodeError:
+                            continue
+        
+        # Calculate total time
+        total_time = time.time() - start_time
+        
+        # Parse thinking and action
+        thinking, action = self._parse_response(raw_content)
+        
+        # Print performance metrics
+        lang = self.config.lang
+        print()
+        print("=" * 50)
+        print(f"⏱️  {get_message('performance_metrics', lang)}:")
+        print("-" * 50)
+        if time_to_first_token is not None:
+            print(f"{get_message('time_to_first_token', lang)}: {time_to_first_token:.3f}s")
+        if time_to_thinking_end is not None:
+            print(f"{get_message('time_to_thinking_end', lang)}:        {time_to_thinking_end:.3f}s")
+        print(f"{get_message('total_inference_time', lang)}:          {total_time:.3f}s")
+        print("=" * 50)
+        
+        return ModelResponse(
+            thinking=thinking,
+            action=action,
+            raw_content=raw_content,
+            time_to_first_token=time_to_first_token,
+            time_to_thinking_end=time_to_thinking_end,
+            total_time=total_time,
+        )
 
 
 class MessageBuilder:
