@@ -134,6 +134,7 @@ class ActionHandler:
             return ActionResult(False, False, "No element coordinates")
 
         x, y = self._convert_relative_to_absolute(element, width, height)
+        print(f"[ActionHandler] Tap: 相对坐标={element}, 绝对坐标=({x}, {y}), 屏幕={width}x{height}")
 
         # Check for sensitive operation
         if "message" in action:
@@ -145,7 +146,9 @@ class ActionHandler:
                 )
 
         device_factory = get_device_factory()
+        print(f"[ActionHandler] 调用 device_factory.tap({x}, {y})...")
         device_factory.tap(x, y, self.device_id)
+        print(f"[ActionHandler] device_factory.tap 返回")
         return ActionResult(True, False)
 
     def _handle_type(self, action: dict, width: int, height: int) -> ActionResult:

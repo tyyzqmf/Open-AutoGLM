@@ -23,7 +23,9 @@ def tap(
         device_id: Ignored for desktop.
         delay: Optional delay after action in seconds.
     """
+    print(f"[Desktop] 执行 Tap: ({x}, {y})")
     pyautogui.click(x, y)
+    print(f"[Desktop] Tap 完成")
     if delay:
         time.sleep(delay)
 
