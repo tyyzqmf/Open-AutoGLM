@@ -11,6 +11,7 @@ class DeviceType(Enum):
     HDC = "hdc"
     IOS = "ios"
     DESKTOP = "desktop"
+    APPIUM = "appium"
 
 
 class DeviceFactory:
@@ -46,6 +47,10 @@ class DeviceFactory:
                 from phone_agent import desktop
 
                 self._module = desktop
+            elif self.device_type == DeviceType.APPIUM:
+                from phone_agent import appium
+
+                self._module = appium
             else:
                 raise ValueError(f"Unknown device type: {self.device_type}")
         return self._module
@@ -144,6 +149,10 @@ class DeviceFactory:
             from phone_agent.desktop import DesktopConnection
 
             return DesktopConnection
+        elif self.device_type == DeviceType.APPIUM:
+            from phone_agent.appium import AppiumConnection
+
+            return AppiumConnection
         else:
             raise ValueError(f"Unknown device type: {self.device_type}")
 

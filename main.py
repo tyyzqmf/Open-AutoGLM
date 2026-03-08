@@ -81,7 +81,22 @@ def check_system_requirements(
         print("-" * 50)
         print("✅ All system checks passed!\n")
         return True
-    
+
+    # Skip checks for Appium (connection is managed externally via APPIUM_ENDPOINT_URL)
+    if device_type == DeviceType.APPIUM:
+        print("🔍 Checking system requirements...")
+        print("-" * 50)
+        print("1. Checking Appium endpoint...", end=" ")
+        import os
+        endpoint = os.environ.get("APPIUM_ENDPOINT_URL", "")
+        if endpoint:
+            print(f"✅ OK (endpoint configured)")
+        else:
+            print("⚠️  APPIUM_ENDPOINT_URL not set (will fail at runtime)")
+        print("-" * 50)
+        print("✅ All system checks passed!\n")
+        return True
+
     print("🔍 Checking system requirements...")
     print("-" * 50)
 
@@ -559,9 +574,9 @@ Examples:
     parser.add_argument(
         "--device-type",
         type=str,
-        choices=["adb", "hdc", "ios", "desktop"],
+        choices=["adb", "hdc", "ios", "desktop", "appium"],
         default=os.getenv("PHONE_AGENT_DEVICE_TYPE", "adb"),
-        help="Device type: adb for Android, hdc for HarmonyOS, ios for iPhone, desktop for Windows/macOS/Linux (default: adb)",
+        help="Device type: adb for Android, hdc for HarmonyOS, ios for iPhone, desktop for Windows/macOS/Linux, appium for remote Appium endpoint (default: adb)",
     )
 
     parser.add_argument(
@@ -577,6 +592,13 @@ Examples:
         nargs="?",
         type=str,
         help="Task to execute (interactive mode if not provided)",
+    )
+
+    parser.add_argument(
+        "--screenshot-output",
+        type=str,
+        default="",
+        help="If set, save a base64 screenshot to this file after task execution",
     )
 
     return parser.parse_args()
@@ -674,6 +696,19 @@ def handle_device_commands(args) -> bool:
     if device_type == DeviceType.IOS:
         return handle_ios_device_commands(args)
 
+    # Appium device type doesn't support local device commands
+    if args.device_type == "appium":
+        if args.list_devices:
+            from phone_agent.appium.connection import list_devices
+            devices = list_devices()
+            if devices:
+                for d in devices:
+                    print(f"  ✓ {d.device_id}  {d.name}")
+            else:
+                print("No Appium devices configured (set APPIUM_ENDPOINT_URL)")
+            return True
+        return False
+
     device_factory = get_device_factory()
     ConnectionClass = device_factory.get_connection_class()
     conn = ConnectionClass()
@@ -750,6 +785,8 @@ def main():
         device_type = DeviceType.HDC
     elif args.device_type == "desktop":
         device_type = DeviceType.DESKTOP
+    elif args.device_type == "appium":
+        device_type = DeviceType.APPIUM
     else:  # ios
         device_type = DeviceType.IOS
 
@@ -817,14 +854,6 @@ def main():
     ):
         sys.exit(1)
 
-    # Check model API connectivity and model availability (skip for SageMaker)
-    if not args.use_sagemaker:
-        if not check_model_api(args.base_url, args.model, args.apikey):
-            sys.exit(1)
-    # Check model API connectivity and model availability (skip for SageMaker)
-    if not args.use_sagemaker:
-        if not check_model_api(args.base_url, args.model, args.apikey):
-            sys.exit(1)
     # Check model API connectivity and model availability (skip for SageMaker)
     if not args.use_sagemaker:
         if not check_model_api(args.base_url, args.model, args.apikey):
@@ -911,6 +940,17 @@ def main():
         print(f"\nTask: {args.task}\n")
         result = agent.run(args.task)
         print(f"\nResult: {result}")
+
+        # 执行完后截图（复用已有 Appium session，不新建连接）
+        if args.screenshot_output:
+            try:
+                device_factory = get_device_factory()
+                shot = device_factory.get_screenshot()
+                with open(args.screenshot_output, "w") as f:
+                    f.write(shot.base64_data)
+                print(f"SCREENSHOT_SAVED:{args.screenshot_output}")
+            except Exception as e:
+                print(f"SCREENSHOT_FAILED:{e}")
     else:
         # Interactive mode
         print("\nEntering interactive mode. Type 'quit' to exit.\n")

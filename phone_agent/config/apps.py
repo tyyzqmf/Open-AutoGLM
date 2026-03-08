@@ -65,6 +65,8 @@ APP_PACKAGES: dict[str, str] = {
     # Finance
     "同花顺": "com.hexin.plat.android",
     # Games
+    "斗地主": "com.unity.ddzjdb",
+    "斗地主经典版": "com.unity.ddzjdb",
     "星穹铁道": "com.miHoYo.hkrpg",
     "崩坏：星穹铁道": "com.miHoYo.hkrpg",
     "恋与深空": "com.papegames.lysk.cn",
