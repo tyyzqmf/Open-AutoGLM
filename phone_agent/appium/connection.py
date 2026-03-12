@@ -68,9 +68,9 @@ class AppiumConnection:
         if device_arn:
             options.set_capability("deviceName", device_arn)
         options.set_capability("newCommandTimeout", 300)
-        # Note: APK is pre-installed when the Device Farm Remote Access Session
-        # is created (via appArn in setup_device_farm.py). Do NOT pass 'app'
-        # capability here — Device Farm rejects ARN/local paths at session time.
+        # Note: APK must be pre-installed when the Device Farm Remote Access Session
+        # is created (via appArn in create_remote_access_session call).
+        # Do NOT pass 'app' capability here — Device Farm Appium endpoint does not support it.
 
         print(f"[Appium] 连接 endpoint: {endpoint_url[:80]}...")
         self._driver = appium_webdriver.Remote(
