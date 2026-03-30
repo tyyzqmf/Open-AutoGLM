@@ -110,10 +110,107 @@ class ActionHandler:
     def _convert_relative_to_absolute(
         self, element: list[int], screen_width: int, screen_height: int
     ) -> tuple[int, int]:
-        """Convert relative coordinates (0-1000) to absolute pixels."""
-        x = int(element[0] / 1000 * screen_width)
-        y = int(element[1] / 1000 * screen_height)
-        return x, y
+        """Convert relative coordinates (0-1000) to absolute Appium tap pixels.
+
+        Mirrors the coordinate transform logic from the LLM-mode
+        ``DeviceFarmClient._scale_action_coords()`` so that AutoGLM and LLM
+        mode behave identically on Device Farm.
+
+        The model outputs coordinates in the screenshot image space (which may
+        be landscape, e.g. 2340×1080).  Appium ``get_window_size()`` may report
+        a different orientation (portrait 1080×2340) or even a completely
+        different logical size.  We detect the mismatch and apply rotation /
+        scaling as needed.
+
+        Parameters
+        ----------
+        element : list[int]
+            [x, y] in 0–1000 normalised screenshot space.
+        screen_width, screen_height : int
+            Actual screenshot pixel dimensions (from PIL).
+        """
+        # First convert normalised coords to screenshot pixel coords
+        sx = element[0] / 1000 * screen_width
+        sy = element[1] / 1000 * screen_height
+
+        # Get Appium logical tap coordinate space
+        device_factory = get_device_factory()
+        try:
+            from phone_agent.appium.connection import AppiumConnection
+            conn = AppiumConnection()
+            size = conn.driver.get_window_size()
+            device_w, device_h = size["width"], size["height"]
+        except Exception:
+            # Fallback: assume screenshot dims == tap dims
+            device_w, device_h = screen_width, screen_height
+
+        # --- Rotation / scaling detection (ported from LLM mode) ---
+        _tol = 0.08  # 8 % tolerance for density / rounding
+
+        screenshot_is_landscape = screen_width > screen_height
+        device_is_portrait = device_h > device_w
+        screenshot_is_portrait = screen_height > screen_width
+        device_is_landscape = device_w > device_h
+
+        same_orientation = (
+            (screenshot_is_landscape and device_is_landscape)
+            or (screenshot_is_portrait and device_is_portrait)
+        )
+
+        direct_match = (
+            abs(screen_width - device_w) / max(device_w, 1) < _tol
+            and abs(screen_height - device_h) / max(device_h, 1) < _tol
+        )
+
+        cross_match = (
+            abs(screen_width - device_h) / max(device_h, 1) < _tol
+            and abs(screen_height - device_w) / max(device_w, 1) < _tol
+        )
+
+        auto_rotated = (
+            screenshot_is_landscape
+            and device_is_portrait
+            and cross_match
+            and not same_orientation
+            and not direct_match
+        )
+
+        # Tie-breaker: Appium orientation API
+        if auto_rotated:
+            try:
+                orientation = conn.driver.orientation
+                if orientation and "LANDSCAPE" in orientation.upper():
+                    auto_rotated = False
+                    if device_h > device_w:
+                        device_w, device_h = device_h, device_w
+                    print(
+                        f"   ℹ️  Appium orientation={orientation}，设备实际横屏，"
+                        f"取消旋转（设备尺寸修正为 {device_w}x{device_h}）"
+                    )
+            except Exception:
+                pass
+
+        # --- Apply transform ---
+        if auto_rotated:
+            # Screenshot was rotated 90° CCW relative to Appium tap space
+            ax = int(sy * device_w / screen_height)
+            ay = int((screen_width - sx) * device_h / screen_width)
+            print(
+                f"   📐 坐标转换(旋转) 归一化={element} → 截图像素=({sx:.0f},{sy:.0f}) "
+                f"→ Appium=({ax},{ay}) [CCW90, 截图={screen_width}x{screen_height}, "
+                f"设备={device_w}x{device_h}]"
+            )
+        else:
+            ax = int(sx * device_w / screen_width)
+            ay = int(sy * device_h / screen_height)
+            if (device_w, device_h) != (screen_width, screen_height):
+                print(
+                    f"   📐 坐标缩放 归一化={element} → 截图像素=({sx:.0f},{sy:.0f}) "
+                    f"→ Appium=({ax},{ay}) [缩放, 截图={screen_width}x{screen_height}, "
+                    f"设备={device_w}x{device_h}]"
+                )
+
+        return ax, ay
 
     def _handle_launch(self, action: dict, width: int, height: int) -> ActionResult:
         """Handle app launch action."""

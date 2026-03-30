@@ -1,6 +1,13 @@
-"""Appium connection management — reads endpoint from APPIUM_ENDPOINT_URL env var."""
+"""Appium connection management — thread-local driver instances.
+
+Each thread gets its own Appium WebDriver session, isolated from other threads.
+Configuration is passed explicitly via ``connect()`` or falls back to
+environment variables (``APPIUM_ENDPOINT_URL``, ``APPIUM_DEVICE_ARN``,
+``APPIUM_SESSION_ID``).
+"""
 
 import os
+import threading
 from dataclasses import dataclass
 
 
@@ -10,27 +17,90 @@ class DeviceInfo:
     name: str = "Appium Device"
 
 
+# Thread-local storage — each thread has its own _driver / _initialized.
+_tls = threading.local()
+
+
 class AppiumConnection:
-    """Singleton Appium WebDriver connection.
+    """Thread-local Appium WebDriver connection.
 
-    The endpoint URL is read from the ``APPIUM_ENDPOINT_URL`` environment
-    variable.  Set it before launching Open-AutoGLM:
+    In multi-threaded parallel runs each thread must operate its own device.
+    ``AppiumConnection()`` always returns the **same Python object** (kept for
+    API compatibility), but the underlying ``driver`` is stored per-thread in
+    ``threading.local()``.
 
-        export APPIUM_ENDPOINT_URL="https://devicefarm-interactive-global..."
-        python main.py --device-type appium "打开斗地主"
+    Preferred usage (thread-safe)::
+
+        conn = AppiumConnection()
+        conn.connect(endpoint_url="https://...", device_arn="arn:...")
+        conn.driver.get_screenshot_as_base64()
+
+    Legacy usage (env-var, single-thread only)::
+
+        os.environ["APPIUM_ENDPOINT_URL"] = "https://..."
+        conn = AppiumConnection()
+        conn._ensure_connected()
     """
 
+    # Keep a single Python-level instance for backward compat — the actual
+    # state lives in _tls so each thread is isolated.
     _instance: "AppiumConnection | None" = None
 
     def __new__(cls):
         if cls._instance is None:
             cls._instance = super().__new__(cls)
-            cls._instance._driver = None
-            cls._instance._initialized = False
         return cls._instance
 
+    # ------------------------------------------------------------------
+    # Explicit connect — preferred for multi-thread
+    # ------------------------------------------------------------------
+
+    def connect(
+        self,
+        endpoint_url: str,
+        device_arn: str = "",
+        session_id: str = "",
+        new_command_timeout: int = 300,
+    ):
+        """Create an Appium driver for the **current thread**.
+
+        Safe to call from multiple threads concurrently — each thread gets
+        its own WebDriver instance connected to its own Device Farm session.
+        """
+        from appium import webdriver as appium_webdriver
+        from selenium.webdriver.common.options import ArgOptions as AppiumOptions
+
+        tid = threading.current_thread().name
+
+        if session_id:
+            print(f"[Appium][{tid}] Attach 到已有 session: {session_id}")
+            driver = appium_webdriver.Remote(
+                command_executor=endpoint_url,
+                options=AppiumOptions(),
+            )
+            driver.session_id = session_id
+            print(f"[Appium][{tid}] ✅ Attach 成功")
+        else:
+            options = AppiumOptions()
+            if device_arn:
+                options.set_capability("deviceName", device_arn)
+            options.set_capability("newCommandTimeout", new_command_timeout)
+            print(f"[Appium][{tid}] 连接 endpoint: ...{endpoint_url[-40:]}")
+            driver = appium_webdriver.Remote(
+                command_executor=endpoint_url,
+                options=options,
+            )
+            print(f"[Appium][{tid}] ✅ 连接成功 (session={driver.session_id[:12]}...)")
+
+        _tls.driver = driver
+        _tls.initialized = True
+
+    # ------------------------------------------------------------------
+    # Legacy env-var path (backward compat, single-thread)
+    # ------------------------------------------------------------------
+
     def _ensure_connected(self):
-        if self._initialized and self._driver is not None:
+        if getattr(_tls, "initialized", False) and getattr(_tls, "driver", None) is not None:
             return
 
         endpoint_url = os.environ.get("APPIUM_ENDPOINT_URL", "")
@@ -40,60 +110,37 @@ class AppiumConnection:
                 "Run setup_device_farm.py first and export the endpoint URL."
             )
 
-        try:
-            from appium import webdriver as appium_webdriver
-            from selenium.webdriver.common.options import ArgOptions as AppiumOptions
-        except ImportError as exc:
-            raise ImportError(
-                "Appium-Python-Client is required. "
-                "Install with: pip install Appium-Python-Client>=3.0"
-            ) from exc
-
         session_id = os.environ.get("APPIUM_SESSION_ID", "")
-        if session_id:
-            # Attach to existing session owned by the main process — no new session created
-            print(f"[Appium] Attach 到已有 session: {session_id}")
-            self._driver = appium_webdriver.Remote(
-                command_executor=endpoint_url,
-                options=AppiumOptions(),
-            )
-            # Override the session_id to attach instead of creating a new one
-            self._driver.session_id = session_id
-            self._initialized = True
-            print("[Appium] ✅ Attach 成功（复用主进程 session）")
-            return
-
         device_arn = os.environ.get("APPIUM_DEVICE_ARN", "")
-        options = AppiumOptions()
-        if device_arn:
-            options.set_capability("deviceName", device_arn)
-        options.set_capability("newCommandTimeout", 300)
-        # Note: APK must be pre-installed when the Device Farm Remote Access Session
-        # is created (via appArn in create_remote_access_session call).
-        # Do NOT pass 'app' capability here — Device Farm Appium endpoint does not support it.
-
-        print(f"[Appium] 连接 endpoint: {endpoint_url[:80]}...")
-        self._driver = appium_webdriver.Remote(
-            command_executor=endpoint_url,
-            options=options,
+        self.connect(
+            endpoint_url=endpoint_url,
+            device_arn=device_arn,
+            session_id=session_id,
         )
-        self._initialized = True
-        print("[Appium] ✅ 连接成功")
+
+    # ------------------------------------------------------------------
+    # Driver property
+    # ------------------------------------------------------------------
 
     @property
     def driver(self):
         self._ensure_connected()
-        return self._driver
+        return _tls.driver
+
+    # ------------------------------------------------------------------
+    # Cleanup
+    # ------------------------------------------------------------------
 
     def quit(self):
-        if self._driver is not None:
+        """Close the Appium session for the **current thread**."""
+        drv = getattr(_tls, "driver", None)
+        if drv is not None:
             try:
-                self._driver.quit()
+                drv.quit()
             except Exception:
                 pass
-            self._driver = None
-            self._initialized = False
-        AppiumConnection._instance = None
+            _tls.driver = None
+            _tls.initialized = False
 
 
 def list_devices() -> list[DeviceInfo]:
